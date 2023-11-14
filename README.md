@@ -1,17 +1,8 @@
 
 # Q-Diffusion: Quantizing Diffusion Models [[website](https://xiuyuli.com/qdiffusion/)] [[paper](http://arxiv.org/abs/2302.04304)]
-Q-diffusion is able to quantize full-precision unconditional diffusion models into 4-bit while maintaining comparable performance (small FID change of at most 2.34 compared to >100 for traditional PTQ) in a training-free manner.
-![example_lsun](assets/example_lsun.png)
 
-Our approach can also be plugged into text-guided image generation, where we run stable diffusion in 4-bit weights and achieve high generation quality for the first time.
-![example_sd](assets/example_sd.png)
 
-*This repository provides the official implementation for Q-Diffusion with calibrated (simulated) quantized checkpoints.*
 
-## Overview
-
-![teaser](assets/teaser.png)  
-Diffusion models have achieved significant success in image synthesis by iteratively estimating noise using deep neural networks. However, the slow inference and the memory and computational intensity of the noise estimation model hinder the efficient implementation of diffusion models. Although post-training quantization (PTQ) is considered a go-to compression method for other tasks, it does not work seamlessly with diffusion models. We propose a novel PTQ method specifically designed for the unique multi-timestep pipeline and model architecture of diffusion models, which compresses the noise estimation network to accelerate the generation process. We identify the primary challenge of diffusion model quantization as the changing output distributions of noise estimation networks over multiple time steps and the bimodal activation distribution of the shortcut layers within the noise estimation network. We address these challenges with timestep-aware calibration and split shortcut quantization in this work.
 ## Getting Started
 
 ### Installation
@@ -76,26 +67,6 @@ python scripts/sample_diffusion_ldm.py -r models/ldm/lsun_churches256/model.ckpt
 
 # Stable Diffusion
 python scripts/txt2img.py --prompt "a photograph of an astronaut riding a horse" --plms --cond --ptq --weight_bit <4 or 8> --quant_mode qdiff --quant_act --act_bit 8 --cali_st 25 --cali_batch_size 8 --cali_n 128 --no_grad_ckpt --split --running_stat --sm_abit 16 --cali_data_path <cali_data_path> --outdir <output_path>
-```
-Note that using different hyperparameters for calibration may result in slightly different performance.
 
-## Citation
-
-If you find this work useful in your research, please consider citing our paper:
-
-```bibtex
-@InProceedings{li2023qdiffusion,
-  author={Li, Xiuyu and Liu, Yijiang and Lian, Long and Yang, Huanrui and Dong, Zhen and Kang, Daniel and Zhang, Shanghang and Keutzer, Kurt},
-  title={Q-Diffusion: Quantizing Diffusion Models},
-  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
-  month={October},
-  year={2023},
-  pages={17535-17545}
-}
-```
-
-## Acknowledgments
-
-Our code was developed based on [ddim](https://github.com/ermongroup/ddim), [latent-diffusion](https://github.com/CompVis/latent-diffusion) and [stable-diffusion](https://github.com/CompVis/stable-diffusion). We referred to [BRECQ](https://github.com/yhhhli/BRECQ) for the blockwise calibration implementation.
-
-We thank [DeepSpeed](https://github.com/microsoft/DeepSpeed) for model sizes and BOPS measurement and [torch-fidelity](https://github.com/toshas/torch-fidelity) for IS and FID computation.
+# VLDM
+python scripts/txt2img.py --prompt "a photograph of an astronaut riding a horse" --plms --cond --ptq --weight_bit 8 --quant_mode qdiff  --quant_act --act_bit 8 --cali_st 25 --cali_batch_size 4 --cali_n 75 --no_grad_ckpt --running_stat --sm_abit 16 --cali_data_path cali_data/video_sample5.pt --ddim_steps 25

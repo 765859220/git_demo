@@ -131,7 +131,7 @@ class PLMSSampler(object):
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
 
-        intermediates = {'x_inter': [img.to('cpu')], 'pred_x0': [img.to('cpu')], 'ts': [], 'cond': [], 'uncond': []}
+        intermediates = {'x_inter': [], 'pred_x0': [], 'ts': [], 'cond': [], 'uncond': []}
         time_range = list(reversed(range(0,timesteps))) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         print(f"Running PLMS Sampling with {total_steps} timesteps")
@@ -163,13 +163,22 @@ class PLMSSampler(object):
             if callback: callback(i)
             if img_callback: img_callback(pred_x0, i)
 
-            if index % log_every_t == 0 or index == total_steps - 1:
-                intermediates['x_inter'].append(img.to('cpu'))
-                intermediates['pred_x0'].append(pred_x0.to('cpu'))
-                intermediates['ts'].append(ts.to('cpu'))
-                intermediates['cond'].append(cond.to('cpu'))
-                intermediates['uncond'].append(unconditional_conditioning.to('cpu'))
+            # if index % log_every_t == 0 or index == total_steps - 1:
+            intermediates['x_inter'].append(img.to('cpu'))
+            intermediates['pred_x0'].append(pred_x0.to('cpu'))
+            intermediates['ts'].append(ts.to('cpu'))
+            intermediates['cond'].append(cond.to('cpu'))
+            intermediates['uncond'].append(unconditional_conditioning.to('cpu'))
+    
+        intermediates['x_inter'] = torch.stack(intermediates['x_inter'], dim=0)
+        intermediates['ts'] = torch.stack(intermediates['ts'], dim=0)
+        intermediates['cond'] = torch.stack(intermediates['cond'], dim=0)
+        intermediates['uncond'] = torch.stack(intermediates['uncond'], dim=0)
+        # 将intermediates存储到.pt文件中
+        torch.save(intermediates, '/vepfs/home/chendong/code/q-diffusion/cali_data/sample64.pt')
 
+
+        from ipdb import set_trace; set_trace()
         return img, intermediates
 
     @torch.no_grad()

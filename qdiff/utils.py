@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from qdiff.quant_layer import QuantModule, UniformAffineQuantizer
-from qdiff.quant_block import BaseQuantBlock
+from qdiff.quant_block import BaseQuantBlock, QuantBasicTransformerBlock_V2
 from qdiff.quant_model import QuantModel
 from qdiff.adaptive_rounding import AdaRoundQuantizer
 from qdiff.quant_layer import UniformAffineQuantizer
@@ -37,12 +37,11 @@ def save_inp_oup_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBloc
     cached_batches = []
     cached_inps, cached_outs = None, None
     torch.cuda.empty_cache()
-
     if not cond:
         cali_xs, cali_ts = cali_data
     else:
         cali_xs, cali_ts, cali_conds = cali_data
-
+    is_sm = True
     if is_sm:
         logger.info("Checking if attention is too large...")
         if not cond:
@@ -66,7 +65,7 @@ def save_inp_oup_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBloc
             logger.info(f"test_out shape: {test_out.shape}")
             if test_out.shape[1] == 4096:
                 is_sm = True
-            
+        is_sm = True
         if is_sm:
             logger.info("Confirmed. Trading speed for memory when caching attn matrix calibration data")
             inds = np.random.choice(cali_xs.size(0), cali_xs.size(0) // 2, replace=False)
@@ -122,7 +121,6 @@ def save_inp_oup_data(model: QuantModel, layer: Union[QuantModule, BaseQuantBloc
                 l_out = cur_out.shape[0] * num
                 cached_outs = torch.zeros(l_out, *cur_out.shape[1:])
             cached_outs.index_copy_(0, torch.arange(i * cur_out.shape[0], (i + 1) * cur_out.shape[0]), cur_out.cpu())
-
     if not is_sm:
         if isinstance(cached_batches[0][0], tuple):
             cached_inps = [
@@ -202,9 +200,10 @@ class DataSaverHook:
         self.input_store = None
         self.output_store = None
 
-    def __call__(self, module, input_batch, output_batch):
+    def __call__(self, module, input_batch, kwargs, output_batch):
         if self.store_input:
             self.input_store = input_batch
+            self.kwargs = kwargs
         if self.store_output:
             self.output_store = output_batch
         if self.stop_forward:
@@ -225,7 +224,7 @@ class GetLayerInpOut:
         self.model.eval()
         self.model.set_quant_state(False, False)
 
-        handle = self.layer.register_forward_hook(self.data_saver)
+        handle = self.layer.register_forward_hook(self.data_saver, with_kwargs=True)
         with torch.no_grad():
             try:
                 _ = self.model(x, timesteps, context)
@@ -247,7 +246,9 @@ class GetLayerInpOut:
         self.model.set_quant_state(False, False)
         self.layer.set_quant_state(True, self.act_quant)
         self.model.train()
-
+        if isinstance(self.layer, QuantBasicTransformerBlock_V2):
+            return (self.data_saver.input_store[0].detach(), 
+                self.data_saver.kwargs['encoder_hidden_states'].detach()), self.data_saver.output_store.detach()
         if len(self.data_saver.input_store) > 1 and torch.is_tensor(self.data_saver.input_store[1]):
             return (self.data_saver.input_store[0].detach(),  
                 self.data_saver.input_store[1].detach()), self.data_saver.output_store.detach()
@@ -323,8 +324,8 @@ def quantize_model_till(model: QuantModule, layer: Union[QuantModule, BaseQuantB
 
 
 def get_train_samples(args, sample_data, custom_steps=None):
-    num_samples, num_st = args.cali_n, args.cali_st
-    custom_steps = args.custom_steps if custom_steps is None else custom_steps
+    num_samples, num_st = args.cali_n, args.cali_st # 128, 25
+    custom_steps = 25
     if num_st == 1:
         xs = sample_data[:num_samples]
         ts = (torch.ones(num_samples) * 800)
@@ -334,18 +335,43 @@ def get_train_samples(args, sample_data, custom_steps=None):
         assert(nsteps >= custom_steps)
         timesteps = list(range(0, nsteps, nsteps//num_st))
         logger.info(f'Selected {len(timesteps)} steps from {nsteps} sampling steps')
-        xs_lst = [sample_data["xs"][i][:num_samples] for i in timesteps]
+        xs_lst = [sample_data["x_inter"][i][:num_samples] for i in timesteps]
         ts_lst = [sample_data["ts"][i][:num_samples] for i in timesteps]
         if args.cond:
             xs_lst += xs_lst
             ts_lst += ts_lst
-            conds_lst = [sample_data["cs"][i][:num_samples] for i in timesteps] + [sample_data["ucs"][i][:num_samples] for i in timesteps]
+            conds_lst = [sample_data["cond"][i][:num_samples] for i in timesteps] + [sample_data["uncond"][i][:num_samples] for i in timesteps]
         xs = torch.cat(xs_lst, dim=0)
         ts = torch.cat(ts_lst, dim=0)
         if args.cond:
             conds = torch.cat(conds_lst, dim=0)
             return xs, ts, conds
     return xs, ts
+
+# def get_train_samples(args, sample_data, custom_steps=None):
+#     num_samples, num_st = args.cali_n, args.cali_st
+#     custom_steps = args.custom_steps if custom_steps is None else custom_steps
+#     if num_st == 1:
+#         xs = sample_data[:num_samples]
+#         ts = (torch.ones(num_samples) * 800)
+#     else:
+#         # get the real number of timesteps (especially for DDIM)
+#         nsteps = len(sample_data["ts"])
+#         assert(nsteps >= custom_steps)
+#         timesteps = list(range(0, nsteps, nsteps//num_st))
+#         logger.info(f'Selected {len(timesteps)} steps from {nsteps} sampling steps')
+#         xs_lst = [sample_data["xs"][i][:num_samples] for i in timesteps]
+#         ts_lst = [sample_data["ts"][i][:num_samples] for i in timesteps]
+#         if args.cond:
+#             xs_lst += xs_lst
+#             ts_lst += ts_lst
+#             conds_lst = [sample_data["cs"][i][:num_samples] for i in timesteps] + [sample_data["ucs"][i][:num_samples] for i in timesteps]
+#         xs = torch.cat(xs_lst, dim=0)
+#         ts = torch.cat(ts_lst, dim=0)
+#         if args.cond:
+#             conds = torch.cat(conds_lst, dim=0)
+#             return xs, ts, conds
+#     return xs, ts
 
 
 def convert_adaround(model):

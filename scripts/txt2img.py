@@ -25,11 +25,20 @@ from qdiff import (
 )
 from qdiff.adaptive_rounding import AdaRoundQuantizer
 from qdiff.quant_layer import UniformAffineQuantizer
-from qdiff.utils import resume_cali_model, get_train_samples
+from qdiff.utils import resume_cali_model, get_train_samples, DataSaverHook
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
 
 logger = logging.getLogger(__name__)
+
+import sys
+import dill
+sys.path.append("/vepfs/home/wangxixi/sd_benchmark/3rdparty/videodiffusion")
+sys.path.append("/vepfs/home/wangxixi/sd_benchmark/")
+
+from smooth.smooth import smooth_lm
+from yoda1.profile.bench_text2video import load_model, prepare, infer
+
 
 # load safety model
 safety_model_id = "CompVis/stable-diffusion-safety-checker"
@@ -278,7 +287,7 @@ def main():
         "--cali_iters", type=int, default=20000, 
         help="number of iterations for each qdiff reconstruction"
     )
-    parser.add_argument('--cali_iters_a', default=5000, type=int, 
+    parser.add_argument('--cali_iters_a', default=500, type=int, 
         help='number of iteration for LSQ')
     parser.add_argument('--cali_lr', default=4e-4, type=float, 
         help='learning rate for LSQ')
@@ -343,8 +352,9 @@ def main():
     os.makedirs(outpath)
 
     log_path = os.path.join(outpath, "run.log")
+    quant_pipeline_path = os.path.join(outpath, "quant_pipeline.pkl")
     logging.basicConfig(
-        format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+        format='%(asctime)s - %(levelname)s - %(name)s -  %(lineno)d -  %(message)s',
         datefmt='%m/%d/%Y %H:%M:%S',
         level=logging.INFO,
         handlers=[
@@ -355,20 +365,19 @@ def main():
     logger = logging.getLogger(__name__)
 
     config = OmegaConf.load(f"{opt.config}")
-    model = load_model_from_config(config, f"{opt.ckpt}")
-
+    pipe = load_model()
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model = model.to(device)
+    pipe = pipe.to(device)
 
-    if opt.plms:
-        sampler = PLMSSampler(model)
-    else:
-        sampler = DDIMSampler(model)
+    # 开启smooth quant
+    # act_scales = torch.load('/home/chendong/code/smoothquant/act_scales/unet.pt')
+    # smooth_lm(model.unet, act_scales, 0.5)
+
 
     assert(opt.cond)
     if opt.ptq:
         if opt.split:
-            setattr(sampler.model.model.diffusion_model, "split", True)
+            setattr(pipe.unet, "split", True)
         if opt.quant_mode == 'qdiff':
             wq_params = {'n_bits': opt.weight_bit, 'channel_wise': True, 'scale_method': 'mse'}
             aq_params = {'n_bits': opt.act_bit, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param':  opt.quant_act}
@@ -379,11 +388,10 @@ def main():
             if opt.resume_w:
                 wq_params['scale_method'] = 'max'
             qnn = QuantModel(
-                model=sampler.model.model.diffusion_model, weight_quant_params=wq_params, act_quant_params=aq_params,
+                model=pipe.unet, weight_quant_params=wq_params, act_quant_params=aq_params,
                 act_quant_mode="qdiff", sm_abit=opt.sm_abit)
             qnn.cuda()
             qnn.eval()
-            # logging.info(qnn)
 
             if opt.no_grad_ckpt:
                 logger.info('Not use gradient checkpointing for transformer blocks')
@@ -406,7 +414,7 @@ def main():
                 else:
                     logger.info("Initializing weight quantization parameters")
                     qnn.set_quant_state(True, False) # enable weight quantization, disable act quantization
-                    _ = qnn(cali_xs[:8].cuda(), cali_ts[:8].cuda(), cali_cs[:8].cuda())
+                    _ = qnn(cali_xs[:2].cuda(), cali_ts[:2].cuda(), cali_cs[:2].cuda())
                     logger.info("Initializing has done!") 
                 # Kwargs for weight rounding calibration
                 kwargs = dict(cali_data=cali_data, batch_size=opt.cali_batch_size, 
@@ -417,6 +425,7 @@ def main():
                     """
                     Block reconstruction. For the first and last layers, we can only apply layer reconstruction.
                     """
+
                     for name, module in model.named_children():
                         logger.info(f"{name} {isinstance(module, BaseQuantBlock)}")
                         if name == 'output_blocks':
@@ -446,32 +455,31 @@ def main():
 
                 if not opt.resume_w:
                     logger.info("Doing weight calibration")
-                    recon_model(qnn)
+                    # recon_model(qnn)
                     qnn.set_quant_state(weight_quant=True, act_quant=False)
                 if opt.quant_act:
                     logger.info("UNet model")
-                    logger.info(model.model)                    
                     logger.info("Doing activation calibration")
                     # Initialize activation quantization parameters
                     qnn.set_quant_state(True, True)
                     with torch.no_grad():
-                        inds = np.random.choice(cali_xs.shape[0], 16, replace=False)
+                        inds = np.random.choice(cali_xs.shape[0], 2, replace=False)
                         _ = qnn(cali_xs[inds].cuda(), cali_ts[inds].cuda(), cali_cs[inds].cuda())
                         if opt.running_stat:
                             logger.info('Running stat for activation quantization')
                             inds = np.arange(cali_xs.shape[0])
                             np.random.shuffle(inds)
                             qnn.set_running_stat(True, opt.rs_sm_only)
-                            for i in trange(int(cali_xs.size(0) / 16)):
-                                _ = qnn(cali_xs[inds[i * 16:(i + 1) * 16]].cuda(), 
-                                    cali_ts[inds[i * 16:(i + 1) * 16]].cuda(),
-                                    cali_cs[inds[i * 16:(i + 1) * 16]].cuda())
+                            for i in trange(int(cali_xs.size(0) / 2)):
+                                _ = qnn(cali_xs[inds[i * 2:(i + 1) * 2]].cuda(), 
+                                    cali_ts[inds[i * 2:(i + 1) * 2]].cuda(),
+                                    cali_cs[inds[i * 2:(i + 1) * 2]].cuda())
                             qnn.set_running_stat(False, opt.rs_sm_only)
 
                     kwargs = dict(
                         cali_data=cali_data, batch_size=opt.cali_batch_size, iters=opt.cali_iters_a, act_quant=True, 
                         opt_mode='mse', lr=opt.cali_lr, p=opt.cali_p, cond=opt.cond)
-                    recon_model(qnn)
+                    # recon_model(qnn)
                     qnn.set_quant_state(weight_quant=True, act_quant=True)
                 
                 logger.info("Saving calibrated quantized UNet model")
@@ -485,105 +493,22 @@ def main():
                                 m.zero_point = nn.Parameter(torch.tensor(float(m.zero_point)))
                             else:
                                 m.zero_point = nn.Parameter(m.zero_point)
-                torch.save(qnn.state_dict(), os.path.join(outpath, "ckpt.pth"))
+                
+                torch.save(qnn.state_dict(), os.path.join(outpath, "qnn.pth"))
+                            
+            logger.info('Saving quantized model as pickle file')
+            with open(quant_pipeline_path, 'wb') as f:
+                dill.dump(pipe, f)
 
-            sampler.model.model.diffusion_model = qnn
-
-    logging.info("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
-    wm = "StableDiffusionV1"
-    wm_encoder = WatermarkEncoder()
-    wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
-
-    batch_size = opt.n_samples
-    n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
-    if not opt.from_file:
-        prompt = opt.prompt
-        assert prompt is not None
-        data = [batch_size * [prompt]]
-
-    else:
-        logging.info(f"reading prompts from {opt.from_file}")
-        with open(opt.from_file, "r") as f:
-            data = f.read().splitlines()
-            data = list(chunk(data, batch_size))
-
-    sample_path = os.path.join(outpath, "samples")
-    os.makedirs(sample_path, exist_ok=True)
-    base_count = len(os.listdir(sample_path))
-    grid_count = len(os.listdir(outpath)) - 1
-
-    # write config out
-    sampling_file = os.path.join(outpath, "sampling_config.yaml")
-    sampling_conf = vars(opt)
-    with open(sampling_file, 'a+') as f:
-        yaml.dump(sampling_conf, f, default_flow_style=False)
-    if opt.verbose:
-        logger.info("UNet model")
-        logger.info(model.model)
-
-    start_code = None
-    if opt.fixed_code:
-        start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
-
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
-    with torch.no_grad():
-        with precision_scope("cuda"):
-            with model.ema_scope():
-                tic = time.time()
-                all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    for prompts in tqdm(data, desc="data"):
-                        uc = None
-                        if opt.scale != 1.0:
-                            uc = model.get_learned_conditioning(batch_size * [""])
-                        if isinstance(prompts, tuple):
-                            prompts = list(prompts)
-                        c = model.get_learned_conditioning(prompts)
-                        shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                         conditioning=c,
-                                                         batch_size=opt.n_samples,
-                                                         shape=shape,
-                                                         verbose=False,
-                                                         unconditional_guidance_scale=opt.scale,
-                                                         unconditional_conditioning=uc,
-                                                         eta=opt.ddim_eta,
-                                                         x_T=start_code)
-
-                        x_samples_ddim = model.decode_first_stage(samples_ddim)
-                        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                        x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
-
-                        x_checked_image = x_samples_ddim
-                        # x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
-
-                        x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
-
-                        if not opt.skip_save:
-                            for x_sample in x_checked_image_torch:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                img = Image.fromarray(x_sample.astype(np.uint8))
-                                img = put_watermark(img, wm_encoder)
-                                img.save(os.path.join(sample_path, f"{base_count:05}.png"))
-                                base_count += 1
-
-                        if not opt.skip_grid:
-                            all_samples.append(x_checked_image_torch)
-
-                if not opt.skip_grid:
-                    # additionally, save as grid
-                    grid = torch.stack(all_samples, 0)
-                    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-                    grid = make_grid(grid, nrow=n_rows)
-
-                    # to image
-                    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    img = Image.fromarray(grid.astype(np.uint8))
-                    img = put_watermark(img, wm_encoder)
-                    img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
-                    grid_count += 1
-
-                toc = time.time()
+    
+    pipe = prepare(
+        pipe,
+        use_compile=False,
+        use_xformers=False,
+        use_deepspeed=False,
+        compile_mode="reduce-overhead",
+    )
+    infer(pipe, outpath)
 
     logging.info(f"Your samples are ready and waiting for you here: \n{outpath} \n"
           f" \nEnjoy.")

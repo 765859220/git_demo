@@ -13,6 +13,10 @@ from ldm.modules.attention import exists, default
 
 from ddim.models.diffusion import ResnetBlock, AttnBlock, nonlinearity
 
+import sys
+sys.path.append("/vepfs/home/wangxixi/sd_benchmark/3rdparty/videodiffusion")
+from libs.models.attention import BasicTransformerBlock_V2
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -386,12 +390,135 @@ class QuantAttnBlock(BaseQuantBlock):
         return out
 
 
+def q_attention(self, query, key, value, attention_mask=None):
+    if self.upcast_attention:
+        query = query.float()
+        key = key.float()
+
+    if self.use_act_quant:
+        quant_q = self.act_quantizer_q(query)
+        quant_k = self.act_quantizer_k(key)
+        attention_scores = torch.baddbmm(
+            torch.empty(quant_q.shape[0], quant_q.shape[1], quant_k.shape[1], dtype=quant_q.dtype, device=quant_q.device),
+            quant_q,
+            quant_k.transpose(-1, -2),
+            beta=0,
+            alpha=self.scale,
+        )
+    else:
+        attention_scores = torch.baddbmm(
+            torch.empty(query.shape[0], query.shape[1], key.shape[1], dtype=query.dtype, device=query.device),
+            query,
+            key.transpose(-1, -2),
+            beta=0,
+            alpha=self.scale,
+        )
+
+    if attention_mask is not None:
+        attention_scores = attention_scores + attention_mask
+
+    if self.upcast_softmax:
+        attention_scores = attention_scores.float()
+
+    attention_probs = attention_scores.softmax(dim=-1)
+
+    # cast back to the original dtype
+    attention_probs = attention_probs.to(value.dtype)
+
+    # compute attention output
+    if self.use_act_quant:
+        hidden_states = torch.bmm(self.act_quantizer_w(attention_probs), self.act_quantizer_v(value))
+    else:
+        hidden_states = torch.bmm(attention_probs, value)
+
+    # reshape hidden_states
+    hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+    return hidden_states
+
+
+class QuantBasicTransformerBlock_V2(BaseQuantBlock):
+    def __init__(self, tran: BasicTransformerBlock_V2, act_quant_params: dict = {},
+                 sm_abit: int = 8):
+        super().__init__(act_quant_params)
+        self.use_ada_layer_norm = tran.use_ada_layer_norm
+        self.only_cross_attention = tran.only_cross_attention
+
+        self.attn1 = tran.attn1
+        self.ff = tran.ff
+        self.attn2 = tran.attn2
+
+        self.norm1 = tran.norm1
+        self.norm2 = tran.norm2
+        self.norm3 = tran.norm3
+
+        self.attn1.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
+        self.attn1.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
+        self.attn1.act_quantizer_v = UniformAffineQuantizer(**act_quant_params)
+
+        self.attn2.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
+        self.attn2.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
+        self.attn2.act_quantizer_v = UniformAffineQuantizer(**act_quant_params)
+
+        act_quant_params_w = act_quant_params.copy()
+        act_quant_params_w['n_bits'] = sm_abit
+        act_quant_params_w['always_zero'] = True
+        self.attn1.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
+        self.attn2.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
+
+        from diffusers.models.attention import CrossAttention
+        self.attn1: CrossAttention
+
+
+        self.attn1._attention = MethodType(q_attention, self.attn1)
+        self.attn2._attention = MethodType(q_attention, self.attn2)
+        self.attn1.use_act_quant = False
+        self.attn2.use_act_quant = False
+    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None):
+        norm_hidden_states = (
+            self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)
+        )
+
+        if self.only_cross_attention:
+            hidden_states = (
+                self.attn1(norm_hidden_states, encoder_hidden_states, attention_mask=attention_mask) + hidden_states
+            )
+        else:
+            hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask) + hidden_states
+
+        if self.attn2 is not None:
+            # Cross-Attention
+            norm_hidden_states = (
+                self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
+            )
+            hidden_states = (
+                self.attn2(
+                    norm_hidden_states, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
+                )
+                + hidden_states
+            )
+
+        # Feed-forward
+        hidden_states = self.ff(self.norm3(hidden_states)) + hidden_states
+        
+        return hidden_states
+    def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
+        self.attn1.use_act_quant = act_quant
+        self.attn2.use_act_quant = act_quant
+
+        # setting weight quantization here does not affect actual forward pass
+        self.use_weight_quant = weight_quant
+        self.use_act_quant = act_quant
+        for m in self.modules():
+            if isinstance(m, QuantModule):
+                m.set_quant_state(weight_quant, act_quant)
+
 def get_specials(quant_act=False):
     specials = {
         ResBlock: QuantResBlock,
         BasicTransformerBlock: QuantBasicTransformerBlock,
-        ResnetBlock: QuantResnetBlock,
-        AttnBlock: QuantAttnBlock,
+        # ResnetBlock: QuantResnetBlock,
+        # AttnBlock: QuantAttnBlock,
+        BasicTransformerBlock_V2: QuantBasicTransformerBlock_V2,
     }
     if quant_act:
         specials[QKMatMul] = QuantQKMatMul

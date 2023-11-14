@@ -6,4 +6,5 @@ __pycache__/
 *.pth
 *.pt
 *.pdf
+*.pkl
 .ipynb_checkpoints/

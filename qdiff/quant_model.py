@@ -2,7 +2,7 @@ import logging
 import torch.nn as nn
 from qdiff.quant_block import get_specials, BaseQuantBlock
 from qdiff.quant_block import QuantBasicTransformerBlock, QuantResBlock
-from qdiff.quant_block import QuantQKMatMul, QuantSMVMatMul, QuantBasicTransformerBlock, QuantAttnBlock
+from qdiff.quant_block import QuantQKMatMul, QuantSMVMatMul, QuantBasicTransformerBlock, QuantAttnBlock, QuantBasicTransformerBlock_V2
 from qdiff.quant_layer import QuantModule, StraightThrough
 from ldm.modules.attention import BasicTransformerBlock
 
@@ -35,7 +35,6 @@ class QuantModel(nn.Module):
                 setattr(module, name, QuantModule(
                     child_module, weight_quant_params, act_quant_params))
                 prev_quantmodule = getattr(module, name)
-
             elif isinstance(child_module, StraightThrough):
                 continue
 
@@ -43,23 +42,62 @@ class QuantModel(nn.Module):
                 self.quant_module_refactor(child_module, weight_quant_params, act_quant_params)
 
     def quant_block_refactor(self, module: nn.Module, weight_quant_params: dict = {}, act_quant_params: dict = {}):
-        for name, child_module in module.named_children():
-            if type(child_module) in self.specials:
-                if self.specials[type(child_module)] in [QuantBasicTransformerBlock, QuantAttnBlock]:
-                    setattr(module, name, self.specials[type(child_module)](child_module,
-                        act_quant_params, sm_abit=self.sm_abit))
-                elif self.specials[type(child_module)] == QuantSMVMatMul:
-                    setattr(module, name, self.specials[type(child_module)](
-                        act_quant_params, sm_abit=self.sm_abit))
-                elif self.specials[type(child_module)] == QuantQKMatMul:
-                    setattr(module, name, self.specials[type(child_module)](
-                        act_quant_params))
-                else:
-                    setattr(module, name, self.specials[type(child_module)](child_module, 
-                        act_quant_params))
-            else:
-                self.quant_block_refactor(child_module, weight_quant_params, act_quant_params)
+        # up_blocks
+        # p_module = module.up_blocks[2].attentions[1].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
 
+        p_module = module.down_blocks[0].attentions[0].transformer_blocks
+        c_module = p_module[0]
+        self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+                        act_quant_params, sm_abit=self.sm_abit))
+        
+        # p_module = module.down_blocks[0].attentions[1].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
+        
+        # p_module = module.down_blocks[1].attentions[0].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
+        
+        # p_module = module.down_blocks[1].attentions[1].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
+        
+        # p_module = module.down_blocks[2].attentions[0].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
+        
+        # p_module = module.down_blocks[2].attentions[1].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
+        # p_module = module.down_blocks[1].attentions[0 1].transformer_blocks
+        # p_module = module.down_blocks[2].attentions[0 1].transformer_blocks
+        # up_blocks[1].attentions[0 1 2].transformer_blocks[0]
+        # up_blocks[2].attentions[0 1 2].transformer_blocks[0]
+        # up_blocks[3].attentions[0 1 2].transformer_blocks[0]
+        # mid_block.attentions[0].transformer_blocks[0]
+        # from ipdb import set_trace; set_trace()
+        # for name, child_module in module.named_children():
+        #     if type(child_module) in self.specials:
+        #         assert self.specials[type(child_module)] == QuantBasicTransformerBlock_V2
+        #         setattr(module, name, self.specials[type(child_module)](child_module,
+        #             act_quant_params, sm_abit=self.sm_abit))
+        #     else:
+        #         self.quant_block_refactor(child_module, weight_quant_params, act_quant_params)
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         for m in self.model.modules():
             if isinstance(m, (QuantModule, BaseQuantBlock)):

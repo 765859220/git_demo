@@ -1,0 +1,5 @@
+11/14/2023 10:10:54 - INFO - __main__ -  397 -  Not use gradient checkpointing for transformer blocks
+11/14/2023 10:10:54 - INFO - __main__ -  404 -  Sampling data from 25 timesteps for calibration
+11/14/2023 10:10:54 - INFO - qdiff.utils -  337 -  Selected 25 steps from 25 sampling steps
+11/14/2023 10:10:54 - INFO - __main__ -  409 -  Calibration data shape: torch.Size([3750, 4, 16, 40, 64]) torch.Size([3750]) torch.Size([3750, 77, 768])
+11/14/2023 10:10:54 - INFO - __main__ -  415 -  Initializing weight quantization parameters
