@@ -36,8 +36,16 @@ dependencies:
     - PyYAML==6.0
     - six==1.16.0
     - tqdm==4.64.0
-    - transformers==4.22.2
+    - transformers==4.26.1
     - omegaconf
+    - dill
+    - diffusers==0.11.1
+    - ipdb
+    - decord
+    - safetensors
+    - typer
+    - accelerate
+    - loguru
     - git+https://github.com/openai/CLIP.git@main#egg=clip
     - -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
     - -e .
