@@ -49,11 +49,11 @@ class QuantModel(nn.Module):
         # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
         #                 act_quant_params, sm_abit=self.sm_abit))
 
-        p_module = module.down_blocks[0].attentions[0].transformer_blocks
-        c_module = p_module[0]
-        self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
-        setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
-                        act_quant_params, sm_abit=self.sm_abit))
+        # p_module = module.down_blocks[0].attentions[0].transformer_blocks
+        # c_module = p_module[0]
+        # self.quant_module_refactor(c_module, weight_quant_params, act_quant_params)
+        # setattr(p_module, '0', QuantBasicTransformerBlock_V2(c_module,
+        #                 act_quant_params, sm_abit=self.sm_abit))
         
         # p_module = module.down_blocks[0].attentions[1].transformer_blocks
         # c_module = p_module[0]
@@ -91,13 +91,13 @@ class QuantModel(nn.Module):
         # up_blocks[3].attentions[0 1 2].transformer_blocks[0]
         # mid_block.attentions[0].transformer_blocks[0]
         # from ipdb import set_trace; set_trace()
-        # for name, child_module in module.named_children():
-        #     if type(child_module) in self.specials:
-        #         assert self.specials[type(child_module)] == QuantBasicTransformerBlock_V2
-        #         setattr(module, name, self.specials[type(child_module)](child_module,
-        #             act_quant_params, sm_abit=self.sm_abit))
-        #     else:
-        #         self.quant_block_refactor(child_module, weight_quant_params, act_quant_params)
+        for name, child_module in module.named_children():
+            if type(child_module) in self.specials:
+                assert self.specials[type(child_module)] == QuantBasicTransformerBlock_V2
+                setattr(module, name, self.specials[type(child_module)](child_module,
+                    act_quant_params, sm_abit=self.sm_abit))
+            else:
+                self.quant_block_refactor(child_module, weight_quant_params, act_quant_params)
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         for m in self.model.modules():
             if isinstance(m, (QuantModule, BaseQuantBlock)):
